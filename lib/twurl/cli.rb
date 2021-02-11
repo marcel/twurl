@@ -5,9 +5,10 @@ module Twurl
     PATH_PATTERN           = /^\/\w+/
     PROTOCOL_PATTERN       = /^\w+:\/\//
     README                 = File.dirname(__FILE__) + '/../../README.md'
+    DEFAULT_REQUEST_METHOD = 'get'
+    DEFAULT_HOST           = 'api.twitter.com'
+    DEFAULT_PROTOCOL       = 'https'
     @output              ||= STDOUT
-    class NoPathFound < Exception
-    end
 
     class << self
       attr_accessor :output
@@ -15,8 +16,8 @@ module Twurl
       def run(args)
         begin
           options = parse_options(args)
-        rescue NoPathFound => e
-          exit
+        rescue Twurl::Exception => exception
+          abort(exception.message)
         end
         dispatch(options)
       end
@@ -50,6 +51,9 @@ module Twurl
         Twurl.options.headers = {}
         Twurl.options.upload  = {}
         Twurl.options.upload['file'] = []
+        Twurl.options.host     = DEFAULT_HOST
+        Twurl.options.protocol = DEFAULT_PROTOCOL
+        Twurl.options.debug_output_io = STDERR
 
         option_parser = OptionParser.new do |o|
           o.extend AvailableOptions
@@ -80,7 +84,6 @@ Supported Commands: #{SUPPORTED_COMMANDS.sort.join(', ')}
             headers
             host
             quiet
-            disable_ssl
             request_method
             help
             version
@@ -98,11 +101,11 @@ Supported Commands: #{SUPPORTED_COMMANDS.sort.join(', ')}
         begin
           arguments               = option_parser.parse!(args)
         rescue OptionParser::InvalidOption
-          CLI.puts "ERROR: undefined option"
-          exit
+          raise Exception "ERROR: undefined option"
+        rescue Twurl::Exception
+          raise
         rescue
-          CLI.puts "ERROR: invalid argument"
-          exit
+          raise Exception "ERROR: invalid argument"
         end
         Twurl.options.command     = extract_command!(arguments)
         Twurl.options.path        = extract_path!(arguments)
@@ -110,8 +113,14 @@ Supported Commands: #{SUPPORTED_COMMANDS.sort.join(', ')}
         
         if Twurl.options.command == DEFAULT_COMMAND and Twurl.options.path.nil? and Twurl.options.args.empty?
           CLI.puts option_parser
-          raise NoPathFound, "No path found"
+          raise Exception, "No path found"
         end
+
+        if Twurl.options.request_method.nil?
+          Twurl.options.request_method = Twurl.options.data.empty? ? DEFAULT_REQUEST_METHOD : 'post'
+        end
+
+        Twurl.options.base_url = "#{Twurl.options.protocol}://#{Twurl.options.host}"
 
         Twurl.options
       end
@@ -172,7 +181,7 @@ Supported Commands: #{SUPPORTED_COMMANDS.sort.join(', ')}
 
         def escape_params(params)
           CGI::parse(params).map do |key, value|
-            "#{CGI.escape key}=#{CGI.escape value.first}"
+            "#{CGI.escape(key)}=#{CGI.escape(value.first)}"
           end.join("&")
         end
     end
@@ -234,12 +243,12 @@ Supported Commands: #{SUPPORTED_COMMANDS.sort.join(', ')}
 
       def data
         on('-d', '--data [data]', 'Sends the specified data in a POST request to the HTTP server.') do |data|
-          if options.args.count { |item| /content-type: (.*)/i.match(item) } > 0
-            options.data[data] = nil
+          if options.args.count { |item| /^content-type:\s+application\/json/i.match(item) } > 0
+            options.json_data = true
+            options.data = data
           else
-            data.split('&').each do |pair|
-              key, value = pair.split('=', 2)
-              options.data[key] = value
+            CGI.parse(data).each_pair do |key, value|
+              options.data[key] = value.first
             end
           end
         end
@@ -247,9 +256,13 @@ Supported Commands: #{SUPPORTED_COMMANDS.sort.join(', ')}
 
       def raw_data
         on('-r', '--raw-data [data]', 'Sends the specified data as it is in a POST request to the HTTP server.') do |data|
-          CGI::parse(data).each_pair do |key, value|
-            options.data[key] = value.first
+          if options.raw_data
+            raise Exception, "ERROR: can't specify '-r' option more than once"
+          elsif options.args.include?('-d') || options.args.include?('--data')
+            raise Exception, "ERROR: can't use '-r' and '-d' options together"
           end
+          options.raw_data = true
+          options.data = data
         end
       end
 
@@ -277,12 +290,6 @@ Supported Commands: #{SUPPORTED_COMMANDS.sort.join(', ')}
         end
       end
 
-      def disable_ssl
-        on('-U', '--no-ssl', 'Disable SSL (default: SSL is enabled)') do |use_ssl|
-          options.protocol = 'http'
-        end
-      end
-
       def request_method
         on('-X', '--request-method [method]', 'Request method (default: GET)') do |request_method|
           options.request_method = request_method.downcase
@@ -298,7 +305,7 @@ Supported Commands: #{SUPPORTED_COMMANDS.sort.join(', ')}
 
       def version
         on_tail("-v", "--version", "Show version") do
-          CLI.puts Version
+          CLI.puts "twurl version: #{Version}\nplatform: #{RUBY_ENGINE} #{RUBY_VERSION} (#{RUBY_PLATFORM})"
           exit
         end
       end
@@ -359,43 +366,11 @@ Supported Commands: #{SUPPORTED_COMMANDS.sort.join(', ')}
   end
 
   class Options < OpenStruct
-    DEFAULT_REQUEST_METHOD = 'get'
-    DEFAULT_HOST           = 'api.twitter.com'
-    DEFAULT_PROTOCOL       = 'https'
-
     def oauth_client_options
       OAuthClient::OAUTH_CLIENT_OPTIONS.inject({}) do |options, option|
         options[option] = send(option)
         options
       end
-    end
-
-    def base_url
-      "#{protocol}://#{host}"
-    end
-
-    def ssl?
-      protocol == 'https'
-    end
-
-    def debug_output_io
-      super || STDERR
-    end
-
-    def request_method
-      super || (data.empty? ? DEFAULT_REQUEST_METHOD : 'post')
-    end
-
-    def protocol
-      super || DEFAULT_PROTOCOL
-    end
-
-    def host
-      super || DEFAULT_HOST
-    end
-
-    def proxy
-      super || nil
     end
   end
 end
